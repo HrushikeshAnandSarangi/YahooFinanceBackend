@@ -9,11 +9,14 @@ app = Flask(__name__)
 CORS(app)
 
 # Valid Indian indices with correct Yahoo Finance symbols
+# Added missing indices that are in the frontend
 VALID_INDICES = {
     'sensex': {'symbol': '^BSESN', 'name': 'BSE SENSEX'},
     'nifty50': {'symbol': '^NSEI', 'name': 'NIFTY 50'},
     'niftybank': {'symbol': '^NSEBANK', 'name': 'NIFTY BANK'},
     'bse500': {'symbol': '^BSE500', 'name': 'BSE 500'},
+    'bse_midcap': {'symbol': '^BSEMC', 'name': 'BSE MIDCAP'},
+    'bse_smallcap': {'symbol': '^BSESC', 'name': 'BSE SMALLCAP'},
 }
 
 IST = pytz.timezone('Asia/Kolkata')
@@ -106,7 +109,7 @@ def get_historical():
         # Process response
         historical = []
         for date, row in data.iterrows():
-            date_ist = date.tz_localize('UTC').tz_convert(IST)
+            date_ist = date.tz_localize('UTC').tz_convert(IST) if date.tzinfo is None else date.astimezone(IST)
             historical.append({
                 "date": date_ist.strftime('%Y-%m-%d'),
                 "open": round(row['Open'], 2),
