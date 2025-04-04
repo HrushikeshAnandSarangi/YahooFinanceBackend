@@ -8,15 +8,12 @@ import pytz
 app = Flask(__name__)
 CORS(app)
 
-# Valid Indian indices with correct Yahoo Finance symbols
-# Added missing indices that are in the frontend
+# Valid Indian indices with verified Yahoo Finance symbols
 VALID_INDICES = {
     'sensex': {'symbol': '^BSESN', 'name': 'BSE SENSEX'},
     'nifty50': {'symbol': '^NSEI', 'name': 'NIFTY 50'},
     'niftybank': {'symbol': '^NSEBANK', 'name': 'NIFTY BANK'},
-    'bse500': {'symbol': '^BSE500', 'name': 'BSE 500'},
-    'bse_midcap': {'symbol': '^BSEMC', 'name': 'BSE MIDCAP'},
-    'bse_smallcap': {'symbol': '^BSESC', 'name': 'BSE SMALLCAP'},
+    # Removed unavailable indices with invalid symbols
 }
 
 IST = pytz.timezone('Asia/Kolkata')
@@ -51,11 +48,15 @@ def get_realtime():
         symbol = VALID_INDICES[index]['symbol']
         ticker = yf.Ticker(symbol)
         
-        # Get latest available data
+        # Get latest data with 1 minute interval
         data = ticker.history(period='1d', interval='1m')
         
         if data.empty:
-            return jsonify({"error": "No recent data available"}), 404
+            app.logger.warning(f"No data found for {symbol}")
+            return jsonify({
+                "error": "No recent data available",
+                "index": index
+            }), 404
             
         latest = data.iloc[-1]
         timestamp = latest.name.astimezone(IST)
@@ -72,7 +73,11 @@ def get_realtime():
         })
 
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        app.logger.error(f"Error in /realtime: {str(e)}")
+        return jsonify({
+            "error": "Failed to fetch realtime data",
+            "details": "Service temporarily unavailable"
+        }), 500
 
 @app.route('/historical', methods=['GET'])
 def get_historical():
@@ -92,9 +97,9 @@ def get_historical():
         end_date = datetime.strptime(end, '%Y-%m-%d').replace(tzinfo=IST) + timedelta(days=1)
         
         if not validate_dates(start_date, end_date):
-            return jsonify({"error": "Invalid date range"}), 400
+            return jsonify({"error": "Date range exceeds 5 years or invalid"}), 400
 
-        # Fetch data
+        # Fetch historical data
         symbol = VALID_INDICES[index]['symbol']
         data = yf.download(
             symbol,
@@ -104,7 +109,11 @@ def get_historical():
         )
 
         if data.empty:
-            return jsonify({"error": "No data found for given range"}), 404
+            return jsonify({
+                "error": "No historical data found",
+                "index": index,
+                "date_range": f"{start} to {end}"
+            }), 404
 
         # Process response
         historical = []
@@ -128,7 +137,11 @@ def get_historical():
     except ValueError as e:
         return jsonify({"error": "Invalid date format. Use YYYY-MM-DD"}), 400
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        app.logger.error(f"Historical data error: {str(e)}")
+        return jsonify({
+            "error": "Failed to fetch historical data",
+            "details": "Check date parameters or try again later"
+        }), 500
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
