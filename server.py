@@ -4,34 +4,34 @@ from flask_cors import CORS
 import yfinance as yf
 from datetime import datetime, timedelta
 import pytz
+import logging
 
 app = Flask(__name__)
 CORS(app)
+app.logger.setLevel(logging.INFO)
 
-# Valid Indian indices with verified Yahoo Finance symbols
 VALID_INDICES = {
     'sensex': {'symbol': '^BSESN', 'name': 'BSE SENSEX'},
     'nifty50': {'symbol': '^NSEI', 'name': 'NIFTY 50'},
     'niftybank': {'symbol': '^NSEBANK', 'name': 'NIFTY BANK'},
-    # Removed unavailable indices with invalid symbols
 }
 
 IST = pytz.timezone('Asia/Kolkata')
+CACHE_DURATION = timedelta(minutes=5)
+data_cache = {}
 
-def validate_dates(start, end):
-    """Validate date range constraints"""
-    if start and end and start > end:
-        return False
-    max_range = timedelta(days=365*5)  # 5 years max
-    if start and end and (end - start) > max_range:
-        return False
-    return True
+def get_cached_data(symbol):
+    now = datetime.now(IST)
+    cached = data_cache.get(symbol)
+    if cached and (now - cached['timestamp']) < CACHE_DURATION:
+        return cached['data']
+    return None
 
 @app.route('/indices', methods=['GET'])
 def list_indices():
-    """Endpoint to list available indices"""
     return jsonify({
-        "indices": {k: v['name'] for k, v in VALID_INDICES.items()}
+        "indices": {k: v['name'] for k, v in VALID_INDICES.items()},
+        "updated_at": datetime.now(IST).isoformat()
     })
 
 @app.route('/realtime', methods=['GET'])
@@ -44,24 +44,31 @@ def get_realtime():
             "available_indices": list(VALID_INDICES.keys())
         }), 400
 
+    symbol = VALID_INDICES[index]['symbol']
+    cached = get_cached_data(symbol)
+    if cached:
+        return jsonify(cached)
+
     try:
-        symbol = VALID_INDICES[index]['symbol']
         ticker = yf.Ticker(symbol)
         
-        # Get latest data with 1 minute interval
+        # Try multiple data sources
         data = ticker.history(period='1d', interval='1m')
+        if data.empty:
+            data = ticker.history(period='5d', interval='1d')
         
         if data.empty:
-            app.logger.warning(f"No data found for {symbol}")
+            app.logger.warning(f"No data available for {symbol}")
             return jsonify({
-                "error": "No recent data available",
-                "index": index
-            }), 404
-            
+                "status": "unavailable",
+                "index": index,
+                "message": "Data source temporarily unavailable"
+            }), 503
+
         latest = data.iloc[-1]
         timestamp = latest.name.astimezone(IST)
-
-        return jsonify({
+        
+        response = {
             "index": index,
             "name": VALID_INDICES[index]['name'],
             "timestamp": timestamp.isoformat(),
@@ -69,79 +76,25 @@ def get_realtime():
             "high": round(latest.High, 2),
             "low": round(latest.Low, 2),
             "close": round(latest.Close, 2),
-            "volume": int(latest.Volume)
-        })
-
-    except Exception as e:
-        app.logger.error(f"Error in /realtime: {str(e)}")
-        return jsonify({
-            "error": "Failed to fetch realtime data",
-            "details": "Service temporarily unavailable"
-        }), 500
-
-@app.route('/historical', methods=['GET'])
-def get_historical():
-    index = request.args.get('index', 'sensex').lower()
-    start = request.args.get('start')
-    end = request.args.get('end') or datetime.now(IST).strftime('%Y-%m-%d')
-
-    if index not in VALID_INDICES:
-        return jsonify({
-            "error": "Invalid index",
-            "available_indices": list(VALID_INDICES.keys())
-        }), 400
-
-    try:
-        # Date parsing with timezone awareness
-        start_date = datetime.strptime(start, '%Y-%m-%d').replace(tzinfo=IST) if start else None
-        end_date = datetime.strptime(end, '%Y-%m-%d').replace(tzinfo=IST) + timedelta(days=1)
+            "volume": int(latest.Volume),
+            "status": "live"
+        }
         
-        if not validate_dates(start_date, end_date):
-            return jsonify({"error": "Date range exceeds 5 years or invalid"}), 400
+        # Cache successful response
+        data_cache[symbol] = {
+            'data': response,
+            'timestamp': datetime.now(IST)
+        }
+        
+        return jsonify(response)
 
-        # Fetch historical data
-        symbol = VALID_INDICES[index]['symbol']
-        data = yf.download(
-            symbol,
-            start=start_date,
-            end=end_date,
-            progress=False
-        )
-
-        if data.empty:
-            return jsonify({
-                "error": "No historical data found",
-                "index": index,
-                "date_range": f"{start} to {end}"
-            }), 404
-
-        # Process response
-        historical = []
-        for date, row in data.iterrows():
-            date_ist = date.tz_localize('UTC').tz_convert(IST) if date.tzinfo is None else date.astimezone(IST)
-            historical.append({
-                "date": date_ist.strftime('%Y-%m-%d'),
-                "open": round(row['Open'], 2),
-                "high": round(row['High'], 2),
-                "low": round(row['Low'], 2),
-                "close": round(row['Close'], 2),
-                "volume": int(row['Volume'])
-            })
-
-        return jsonify({
-            "index": index,
-            "name": VALID_INDICES[index]['name'],
-            "data": historical
-        })
-
-    except ValueError as e:
-        return jsonify({"error": "Invalid date format. Use YYYY-MM-DD"}), 400
     except Exception as e:
-        app.logger.error(f"Historical data error: {str(e)}")
+        app.logger.error(f"API failure for {symbol}: {str(e)}")
         return jsonify({
-            "error": "Failed to fetch historical data",
-            "details": "Check date parameters or try again later"
-        }), 500
+            "status": "error",
+            "index": index,
+            "message": "Financial data service unavailable"
+        }), 503
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
