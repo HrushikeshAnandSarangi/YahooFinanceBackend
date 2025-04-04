@@ -2,106 +2,128 @@ import os
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 import yfinance as yf
-from datetime import datetime
+from datetime import datetime, timedelta
+import pytz
 
 app = Flask(__name__)
 CORS(app)
 
-# Supported Indian indices with their Yahoo Finance symbols
-INDICES = {
-    'sensex': '^BSESN',        # BSE SENSEX
-    'nifty50': '^NSEI',        # NIFTY 50
-    'niftybank': '^NSEBANK',   # NIFTY BANK
-    'bse500': '^BSE500',       # BSE 500
-    'bse_midcap': 'BSEMIDCAP', # BSE MIDCAP
-    'bse_smallcap': 'BSESMLCAP' # BSE SMALLCAP
+# Valid Indian indices with correct Yahoo Finance symbols
+VALID_INDICES = {
+    'sensex': {'symbol': '^BSESN', 'name': 'BSE SENSEX'},
+    'nifty50': {'symbol': '^NSEI', 'name': 'NIFTY 50'},
+    'niftybank': {'symbol': '^NSEBANK', 'name': 'NIFTY BANK'},
+    'bse500': {'symbol': '^BSE500', 'name': 'BSE 500'},
 }
 
-def validate_date(date_str):
-    try:
-        return datetime.strptime(date_str, "%Y-%m-%d")
-    except ValueError:
-        return None
+IST = pytz.timezone('Asia/Kolkata')
 
-def get_symbol(index_name):
-    return INDICES.get(index_name.lower())
+def validate_dates(start, end):
+    """Validate date range constraints"""
+    if start and end and start > end:
+        return False
+    max_range = timedelta(days=365*5)  # 5 years max
+    if start and end and (end - start) > max_range:
+        return False
+    return True
+
+@app.route('/indices', methods=['GET'])
+def list_indices():
+    """Endpoint to list available indices"""
+    return jsonify({
+        "indices": {k: v['name'] for k, v in VALID_INDICES.items()}
+    })
 
 @app.route('/realtime', methods=['GET'])
 def get_realtime():
-    try:
-        index = request.args.get('index', 'sensex')
-        symbol = get_symbol(index)
-        
-        if not symbol:
-            return jsonify({
-                "error": "Invalid index",
-                "available_indices": list(INDICES.keys())
-            }), 400
+    index = request.args.get('index', 'sensex').lower()
+    
+    if index not in VALID_INDICES:
+        return jsonify({
+            "error": "Invalid index",
+            "available_indices": list(VALID_INDICES.keys())
+        }), 400
 
+    try:
+        symbol = VALID_INDICES[index]['symbol']
         ticker = yf.Ticker(symbol)
-        data = ticker.history(period="1d")
+        
+        # Get latest available data
+        data = ticker.history(period='1d', interval='1m')
         
         if data.empty:
-            return jsonify({"error": "No data found"}), 404
+            return jsonify({"error": "No recent data available"}), 404
             
         latest = data.iloc[-1]
+        timestamp = latest.name.astimezone(IST)
+
         return jsonify({
             "index": index,
-            "symbol": symbol,
-            "timestamp": latest.name.isoformat(),
-            "open": latest.Open,
-            "high": latest.High,
-            "low": latest.Low,
-            "close": latest.Close,
-            "volume": latest.Volume
+            "name": VALID_INDICES[index]['name'],
+            "timestamp": timestamp.isoformat(),
+            "open": round(latest.Open, 2),
+            "high": round(latest.High, 2),
+            "low": round(latest.Low, 2),
+            "close": round(latest.Close, 2),
+            "volume": int(latest.Volume)
         })
+
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
 @app.route('/historical', methods=['GET'])
 def get_historical():
+    index = request.args.get('index', 'sensex').lower()
+    start = request.args.get('start')
+    end = request.args.get('end') or datetime.now(IST).strftime('%Y-%m-%d')
+
+    if index not in VALID_INDICES:
+        return jsonify({
+            "error": "Invalid index",
+            "available_indices": list(VALID_INDICES.keys())
+        }), 400
+
     try:
-        index = request.args.get('index', 'sensex')
-        start_date = request.args.get('start')
-        end_date = request.args.get('end')
-        symbol = get_symbol(index)
+        # Date parsing with timezone awareness
+        start_date = datetime.strptime(start, '%Y-%m-%d').replace(tzinfo=IST) if start else None
+        end_date = datetime.strptime(end, '%Y-%m-%d').replace(tzinfo=IST) + timedelta(days=1)
         
-        if not symbol:
-            return jsonify({
-                "error": "Invalid index",
-                "available_indices": list(INDICES.keys())
-            }), 400
+        if not validate_dates(start_date, end_date):
+            return jsonify({"error": "Invalid date range"}), 400
 
-        # Validate dates
-        start = validate_date(start_date) if start_date else None
-        end = validate_date(end_date) if end_date else None
-        
-        if (start_date and not start) or (end_date and not end):
-            return jsonify({"error": "Invalid date format. Use YYYY-MM-DD"}), 400
-
-        # Get historical data
+        # Fetch data
+        symbol = VALID_INDICES[index]['symbol']
         data = yf.download(
             symbol,
-            start=start,
-            end=end,
+            start=start_date,
+            end=end_date,
             progress=False
         )
-        
+
         if data.empty:
             return jsonify({"error": "No data found for given range"}), 404
-        
-        historical = [{
+
+        # Process response
+        historical = []
+        for date, row in data.iterrows():
+            date_ist = date.tz_localize('UTC').tz_convert(IST)
+            historical.append({
+                "date": date_ist.strftime('%Y-%m-%d'),
+                "open": round(row['Open'], 2),
+                "high": round(row['High'], 2),
+                "low": round(row['Low'], 2),
+                "close": round(row['Close'], 2),
+                "volume": int(row['Volume'])
+            })
+
+        return jsonify({
             "index": index,
-            "symbol": symbol,
-            "date": date.strftime("%Y-%m-%d"),
-            "open": row.Open,
-            "high": row.High,
-            "low": row.Low,
-            "close": row.Close,
-            "volume": row.Volume
-        } for date, row in data.iterrows()]
-        
-        return jsonify(historical)
+            "name": VALID_INDICES[index]['name'],
+            "data": historical
+        })
+
+    except ValueError as e:
+        return jsonify({"error": "Invalid date format. Use YYYY-MM-DD"}), 400
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
